@@ -1,7 +1,6 @@
-package com.jzh.model.group;
+package com.jzh.raft.core.model.group;
 
-import com.jzh.model.node.NodeEndPoint;
-import com.jzh.model.node.NodeId;
+import com.jzh.raft.core.model.node.NodeEndPoint;
 import lombok.Getter;
 
 import java.util.*;
@@ -14,7 +13,7 @@ import java.util.stream.Collectors;
 public class NodeGroup {
     @Getter
     private final NodeEndPoint self;
-    private Map<NodeId, GroupMember> memberMap;
+    private Map<String, GroupMember> memberMap;
 
     public static NodeGroup GetInstance(NodeEndPoint self, NodeEndPoint nodeEndPoint) {
         return new NodeGroup(self, Collections.singleton(nodeEndPoint));
@@ -32,7 +31,7 @@ public class NodeGroup {
         this.memberMap = buildMemberMap(self, nodeEndPoints);
     }
 
-    private Map<NodeId, GroupMember> buildMemberMap(NodeEndPoint self, Collection<NodeEndPoint> nodeEndPoints) {
+    private Map<String, GroupMember> buildMemberMap(NodeEndPoint self, Collection<NodeEndPoint> nodeEndPoints) {
         if (nodeEndPoints.isEmpty()) {
             throw new IllegalArgumentException("nodeEndPoints is empty");
         }
@@ -51,11 +50,11 @@ public class NodeGroup {
      * @param memberMap
      * @param newNodeEndPoints
      */
-    private void checkMemberLegal(Map<NodeId, GroupMember> memberMap, Collection<NodeEndPoint> newNodeEndPoints) {
+    private void checkMemberLegal(Map<String, GroupMember> memberMap, Collection<NodeEndPoint> newNodeEndPoints) {
         List<String> dupNodeIds = newNodeEndPoints.stream().map(NodeEndPoint::getNodeId)
                 .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()))
                 .entrySet().stream().filter(nodeIdLongEntry -> nodeIdLongEntry.getValue() > 1)
-                .map(Map.Entry::getKey).map(NodeId::toString).collect(Collectors.toList());
+                .map(Map.Entry::getKey).collect(Collectors.toList());
         
         if (!dupNodeIds.isEmpty()) {
             throw new IllegalArgumentException("duplication nodeEndPoints, nodeIds : " + dupNodeIds);
@@ -71,7 +70,7 @@ public class NodeGroup {
         }
     }
 
-    public GroupMember getMember(NodeId nodeId) {
+    public GroupMember getMember(String nodeId) {
         return this.memberMap.get(nodeId);
     }
 
@@ -79,9 +78,15 @@ public class NodeGroup {
         return new ArrayList<>(this.memberMap.values());
     }
 
-    public List<GroupMember> listOtherMembers() {
+    public List<GroupMember> listMembersExceptSelf() {
         return this.memberMap.values().stream()
                 .filter(groupMember -> !groupMember.getNodeEndPoint().equals(this.self))
+                .collect(Collectors.toList());
+    }
+
+    public List<NodeEndPoint> listNodeEndPointExceptSelf() {
+        return listMembersExceptSelf().stream()
+                .map(GroupMember::getNodeEndPoint)
                 .collect(Collectors.toList());
     }
 
@@ -96,7 +101,7 @@ public class NodeGroup {
         }
     }
 
-    public NodeEndPoint delMember(NodeId nodeId) {
+    public NodeEndPoint delMember(String nodeId) {
         GroupMember member = this.memberMap.remove(nodeId);
         if (member != null) {
             return member.getNodeEndPoint();

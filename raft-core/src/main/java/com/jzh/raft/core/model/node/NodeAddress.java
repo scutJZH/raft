@@ -1,4 +1,4 @@
-package com.jzh.model.node;
+package com.jzh.raft.core.model.node;
 
 /**
  * 节点地址实体类

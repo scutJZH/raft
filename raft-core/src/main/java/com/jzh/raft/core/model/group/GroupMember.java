@@ -1,6 +1,6 @@
-package com.jzh.model.group;
+package com.jzh.raft.core.model.group;
 
-import com.jzh.model.node.NodeEndPoint;
+import com.jzh.raft.core.model.node.NodeEndPoint;
 import lombok.Getter;
 
 public class GroupMember {

@@ -6,7 +6,8 @@
         <sourceOutputDir name="target/generated-sources/annotations" />
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
-        <module name="raft-instance" />
+        <module name="raft-core" />
+        <module name="kv-store" />
       </profile>
     </annotationProcessing>
   </component>
