@@ -1,4 +1,4 @@
-package com.jzh.raft.core.model.rpc;
+package com.jzh.raft.core.model.rpc.message;
 
 import lombok.Getter;
 
