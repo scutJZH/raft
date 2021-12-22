@@ -12,7 +12,6 @@ import com.jzh.raft.core.model.schedule.LogReplicationSchedule;
 import com.jzh.raft.core.store.INodeStore;
 
 import java.util.Collections;
-import java.util.Objects;
 
 public class Node implements INode {
     private Boolean started;
@@ -30,8 +29,7 @@ public class Node implements INode {
         }
         nodeContext.init();
         INodeStore nodeStore = nodeContext.getNodeStore();
-        ElectionSchedule electionSchedule = nodeContext.getScheduleManagement().generateElectionSchedule(this::electionTimeoutEvent);
-        nodeRole = new FollowerNodeRole(nodeStore.getCurrentTerm(), null, nodeStore.getVoteFor(), electionSchedule);
+        nodeRole = new FollowerNodeRole(nodeStore.getCurrentTerm(), null, nodeStore.getVoteFor(), generateElectionTimeoutEvent());
         started = true;
     }
 
@@ -44,20 +42,16 @@ public class Node implements INode {
         started = false;
     }
 
-    // todo 事务
-    private void roleChangeTo(AbstractNodeRole newRole) {
-        INodeStore nodeStore = nodeContext.getNodeStore();
-        nodeStore.storeCurrentTerm(newRole.getTerm());
-        if (NodeRoleEnum.FOLLOWER.equals(newRole.getNodeRole())) {
-            nodeStore.storeVoteFor(((FollowerNodeRole)newRole).getLeaderId());
-        }
-        this.nodeRole = newRole;
-    }
-
+    /**
+     * 选举超时事件
+     */
     private void electionTimeoutEvent() {
         this.nodeContext.getTaskExecutor().submit(this::processElectionTimeout);
     }
 
+    /**
+     * 处理选举超时事件
+     */
     private void processElectionTimeout() {
         if (NodeRoleEnum.LEADER.equals(this.nodeRole.getNodeRole())) {
             return;
@@ -74,37 +68,54 @@ public class Node implements INode {
         // send requestVote rpc
         RequestVoteRpc requestVoteRpc = new RequestVoteRpc(this.nodeRole.getTerm(), this.nodeContext.getSelfId(),
                 this.nodeContext.getLastCommitLogIndex(), this.nodeContext.getLastCommitLogTerm());
-        this.nodeContext.getConnector().sendRequestVote(requestVoteRpc, this.nodeContext.getNodeGroup().listNodeEndPointExceptSelf());
+        RequestVoteRpcMsg requestVoteRpcMsg = new RequestVoteRpcMsg(this.nodeContext.getSelfId(), requestVoteRpc);
+        this.nodeContext.getConnector().sendRequestVote(requestVoteRpcMsg, this.nodeContext.getNodeGroup().listNodeEndPointExceptSelf());
     }
 
+    /**
+     * 日志复制事件
+     */
     private void logReplicationEvent() {
         this.nodeContext.getTaskExecutor().submit(this::processLogReplicationEvent);
     }
 
+    /**
+     * 处理日志复制事件
+     */
     private void processLogReplicationEvent() {
         for (GroupMember member : this.nodeContext.getNodeGroup().listMembersExceptSelf()) {
             replicateLogToMember(member);
         }
     }
 
+    /**
+     * 复制日志给某个具体member
+     */
     private void replicateLogToMember(GroupMember member) {
         AppendEntriesRpc rpc = new AppendEntriesRpc(this.nodeContext.getSelfId(), this.nodeRole.getTerm(),
                 Collections.emptyList(), 0L, 0L, 0L);
-        this.nodeContext.getConnector().sendAppendEntries(rpc, member.getNodeEndPoint());
+        AppendEntriesRpcMsg message = new AppendEntriesRpcMsg(this.nodeContext.getSelfId(), rpc);
+        this.nodeContext.getConnector().sendAppendEntries(message, member.getNodeEndPoint());
     }
 
-
-    private void onReceiveRequestVoteRpc(RequestVoteMsg message) {
+    /**
+     * 收到请求选票请求
+     */
+    private void onReceiveRequestVoteRpc(RequestVoteRpcMsg message) {
         this.nodeContext.getTaskExecutor().submit(
                 () -> {
                     NodeEndPoint replyNodeEndPoint = this.nodeContext.getNodeGroup().getMember(message.getCandidateId()).getNodeEndPoint();
-                    RequestVoteResult requestVoteResult = processRequestVoteRpc(message);
-                    this.nodeContext.getConnector().replyRequestVote(requestVoteResult, replyNodeEndPoint);
+                    RequestVoteResult result = processRequestVoteRpc(message);
+                    RequestVoteResultMsg resultMsg = new RequestVoteResultMsg(this.nodeContext.getSelfId(), result);
+                    this.nodeContext.getConnector().replyRequestVote(resultMsg, replyNodeEndPoint);
                 }
         );
     }
 
-    private RequestVoteResult processRequestVoteRpc(RequestVoteMsg message) {
+    /**
+     * 处理请求选票请求
+     */
+    private RequestVoteResult processRequestVoteRpc(RequestVoteRpcMsg message) {
         RequestVoteRpc requestVoteRpc = message.getRequestVoteRpc();
         Long currentTerm = this.nodeRole.getTerm();
         // 1. the term of request is smaller than currentTerm: return false
@@ -141,10 +152,90 @@ public class Node implements INode {
         return new RequestVoteResult(false, currentTerm);
     }
 
+    /**
+     * 收到请求选票回复
+     */
+    private void onReceiveAppendEntriesResult(AppendEntriesResultMsg message) {
+        this.nodeContext.getTaskExecutor().submit(() -> processReceiveAppendEntriesResult(message));
+    }
+
+    /**
+     * 处理请求选票回复
+     */
+    private void processReceiveAppendEntriesResult(AppendEntriesResultMsg message) {
+        if (NodeRoleEnum.LEADER.equals(this.nodeRole.getNodeRole())) {
+            return;
+        }
+        if (message.getAppendEntriesResult().getTerm() > this.nodeRole.getTerm()) {
+            roleChangeTo(new FollowerNodeRole(message.getAppendEntriesResult().getTerm(), null, null, generateElectionTimeoutEvent()));
+        }
+    }
+
+    /**
+     * 收到同步日志请求
+     */
+    private void onReceiveAppendEntriesRpc(AppendEntriesRpcMsg message) {
+        this.nodeContext.getTaskExecutor().submit(() -> {
+            NodeEndPoint leaderPoint = this.nodeContext.getNodeGroup().getMember(message.getLeaderId()).getNodeEndPoint();
+            AppendEntriesResult result = processAppendEntriesRpc(message);
+            AppendEntriesResultMsg resultMsg = new AppendEntriesResultMsg(this.nodeContext.getSelfId(), result);
+            this.nodeContext.getConnector().replyAppendEntries(resultMsg, leaderPoint);
+
+        });
+    }
+
+    /**
+     * 处理同步日志请求
+     */
+    private AppendEntriesResult processAppendEntriesRpc(AppendEntriesRpcMsg message) {
+        AppendEntriesRpc appendEntriesRpc = message.getAppendEntriesRpc();
+
+        if (appendEntriesRpc.getTerm() < this.nodeRole.getTerm()) {
+            return new AppendEntriesResult(false, this.nodeRole.getTerm());
+        }
+
+        // become follower or refresh election schedule
+        if (appendEntriesRpc.getTerm() > this.nodeRole.getTerm()) {
+            roleChangeTo(new FollowerNodeRole(appendEntriesRpc.getTerm(), appendEntriesRpc.getLeaderId(), null, generateElectionTimeoutEvent()));
+            return new AppendEntriesResult(appendEntries(appendEntriesRpc), this.nodeRole.getTerm());
+        }
+
+        switch (this.nodeRole.getNodeRole()) {
+            case LEADER:
+                // theoretically impossible
+                return new AppendEntriesResult(false, this.nodeRole.getTerm());
+            case CANDIDATE:
+                // more than one candidate, become a follower
+                roleChangeTo(new FollowerNodeRole(appendEntriesRpc.getTerm(), appendEntriesRpc.getLeaderId(), null, generateElectionTimeoutEvent()));
+                return new AppendEntriesResult(appendEntries(appendEntriesRpc), this.nodeRole.getTerm());
+            case FOLLOWER:
+                roleChangeTo(new FollowerNodeRole(appendEntriesRpc.getTerm(), appendEntriesRpc.getLeaderId(),
+                        ((FollowerNodeRole)this.nodeRole).getVotedFor(), generateElectionTimeoutEvent()));
+                return new AppendEntriesResult(appendEntries(appendEntriesRpc), this.nodeRole.getTerm());
+            default:
+                throw new IllegalArgumentException("unexpected node role, " + this.nodeRole.getNodeRole());
+        }
+
+    }
+
+    /**
+     * 同步日志
+     */
+    private Boolean appendEntries(AppendEntriesRpc appendEntriesRpc) {
+        // todo 待实现
+        return true;
+    }
+
+    /**
+     * 收到同步日志回复
+     */
     private void onReceiveRequestVoteResult(RequestVoteResultMsg message) {
         this.nodeContext.getTaskExecutor().submit(() -> processRequestVoteResult(message));
     }
 
+    /**
+     * 处理同步日志回复
+     */
     private void processRequestVoteResult(RequestVoteResultMsg message) {
         RequestVoteResult requestVoteResult = message.getRequestVoteResult();
 
@@ -169,11 +260,30 @@ public class Node implements INode {
 
     }
 
+    /**
+     * 生成并注册一个选举超时schedule
+     */
     private ElectionSchedule generateElectionTimeoutEvent() {
         return this.nodeContext.getScheduleManagement().generateElectionSchedule(this::electionTimeoutEvent);
     }
 
+    /**
+     * 生成并注册一个日志同步schedule
+     */
     private LogReplicationSchedule generateLogReplicationEvent() {
         return this.nodeContext.getScheduleManagement().generateLogReplicationSchedule(this::logReplicationEvent);
+    }
+
+    /**
+     * 改变角色
+     */
+    // todo 事务
+    private void roleChangeTo(AbstractNodeRole newRole) {
+        INodeStore nodeStore = nodeContext.getNodeStore();
+        nodeStore.storeCurrentTerm(newRole.getTerm());
+        if (NodeRoleEnum.FOLLOWER.equals(newRole.getNodeRole())) {
+            nodeStore.storeVoteFor(((FollowerNodeRole)newRole).getLeaderId());
+        }
+        this.nodeRole = newRole;
     }
 }
