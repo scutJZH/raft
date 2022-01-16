@@ -153,14 +153,14 @@ public class Node implements INode {
     }
 
     /**
-     * 收到请求选票回复
+     * 收到同步日志回复
      */
     private void onReceiveAppendEntriesResult(AppendEntriesResultMsg message) {
         this.nodeContext.getTaskExecutor().submit(() -> processReceiveAppendEntriesResult(message));
     }
 
     /**
-     * 处理请求选票回复
+     * 处理同步日志回复
      */
     private void processReceiveAppendEntriesResult(AppendEntriesResultMsg message) {
         if (NodeRoleEnum.LEADER.equals(this.nodeRole.getNodeRole())) {
@@ -227,14 +227,14 @@ public class Node implements INode {
     }
 
     /**
-     * 收到同步日志回复
+     * 收到请求投票回复
      */
     private void onReceiveRequestVoteResult(RequestVoteResultMsg message) {
         this.nodeContext.getTaskExecutor().submit(() -> processRequestVoteResult(message));
     }
 
     /**
-     * 处理同步日志回复
+     * 处理请求投票回复
      */
     private void processRequestVoteResult(RequestVoteResultMsg message) {
         RequestVoteResult requestVoteResult = message.getRequestVoteResult();

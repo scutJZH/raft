@@ -30,7 +30,7 @@ public class ScheduleManagement implements IScheduleManagement {
     @Override
     public LogReplicationSchedule generateLogReplicationSchedule(Runnable task) {
         ScheduledFuture<?> scheduledFuture = this.scheduledExecutorService.scheduleWithFixedDelay(task, logReplicationDelay, logReplicationInterval, TimeUnit.MILLISECONDS);
-        return null;
+        return new LogReplicationSchedule(scheduledFuture);
     }
 
     @Override
