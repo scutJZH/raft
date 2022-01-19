@@ -1,12 +1,11 @@
 package com.jzh.raft.core2.model.node;
 
 import com.jzh.raft.core2.model.node.context.NodeContext;
-import com.jzh.raft.core2.model.node.role.AbsNodeRole;
-import com.jzh.raft.core2.model.node.role.CandidateRole;
-import com.jzh.raft.core2.model.node.role.FollowerRole;
+import com.jzh.raft.core2.model.node.role.*;
 import com.jzh.raft.core2.model.rpc.msg.RequestVoteResult;
 import com.jzh.raft.core2.model.rpc.msg.RequestVoteRpc;
 import com.jzh.raft.core2.model.schedule.ElectionTimeoutSchedule;
+import com.jzh.raft.core2.model.schedule.LogReplicationSchedule;
 
 import java.util.Objects;
 
@@ -42,10 +41,10 @@ public class Node implements INode {
         this.nodeContext.getConnector().sendRequestVoteRpc(nodeContext.getNodeAddressMap().values(), requestVoteRpc);
     }
 
-    private ElectionTimeoutSchedule getANewElectionTimeoutSchedule() {
-        return nodeContext.getScheduleManagement().generateElectionTimeoutSchedule(this::electionTimeoutEvent);
-    }
-
+    /**
+     * receive request vote rpc
+     * @param requestVoteRpc params
+     */
     private void onReceiveRequestVoteRpc(RequestVoteRpc requestVoteRpc) {
         this.nodeContext.getExecutorPool().submit(() -> {
             RequestVoteResult result = processReceiveRequestVoteRpc(requestVoteRpc);
@@ -54,9 +53,9 @@ public class Node implements INode {
     }
 
     /**
-     *
-     * @param requestVoteRpc
-     * @return
+     * handle request vote rpc
+     * @param requestVoteRpc params
+     * @return request vote result
      */
     private RequestVoteResult processReceiveRequestVoteRpc(RequestVoteRpc requestVoteRpc) {
         // when requestVote.term is bigger than currentTerm
@@ -97,11 +96,46 @@ public class Node implements INode {
 
     }
 
+    /**
+     * receive request vote result reply
+     * @param requestVoteResult params
+     */
     private void onReceiveRequestVoteResult(RequestVoteResult requestVoteResult) {
         this.nodeContext.getExecutorPool().submit(() -> processReceiveRequestVoteResult(requestVoteResult));
     }
 
     private void processReceiveRequestVoteResult(RequestVoteResult requestVoteResult) {
+        if (!RoleTypeEnum.CANDIDATE.equals(this.role.getRoleType())) {
+            return;
+        }
+        if (!requestVoteResult.getResult() && requestVoteResult.getOwnTerm() > this.role.getCurrentTerm()) {
+            this.role = new FollowerRole(requestVoteResult.getOwnTerm(), null, getANewElectionTimeoutSchedule());
+            return;
+        }
+        if (requestVoteResult.getResult()) {
+            CandidateRole candidateRole = (CandidateRole) (this.role);
+            int voteCount = candidateRole.getVoteCount() + 1;
+            if (voteCount > (this.nodeContext.getNodeAddressMap().size() + 1) / 2) {
+                this.role = new LeaderRole(this.role.getCurrentTerm(), getANewLogReplicationSchedule());
+            } else {
+                candidateRole.setVoteCount(voteCount);
+            }
+        }
+    }
+
+    private ElectionTimeoutSchedule getANewElectionTimeoutSchedule() {
+        return nodeContext.getScheduleManagement().generateElectionTimeoutSchedule(this::electionTimeoutEvent);
+    }
+
+    private LogReplicationSchedule getANewLogReplicationSchedule() {
+        return nodeContext.getScheduleManagement().generateLogReplicationSchedule(this::logReplicationEvent);
+    }
+
+    private void logReplicationEvent() {
+        this.nodeContext.getExecutorPool().submit(this::processLogReplicationEvent);
+    }
+
+    private void processLogReplicationEvent() {
 
     }
 
