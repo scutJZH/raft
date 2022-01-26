@@ -2,18 +2,30 @@ package com.jzh.raft.core2.model.node;
 
 import com.jzh.raft.core2.model.node.context.NodeContext;
 import com.jzh.raft.core2.model.node.role.*;
+import com.jzh.raft.core2.model.rpc.msg.AppendEntriesRpc;
 import com.jzh.raft.core2.model.rpc.msg.RequestVoteResult;
 import com.jzh.raft.core2.model.rpc.msg.RequestVoteRpc;
 import com.jzh.raft.core2.model.schedule.ElectionTimeoutSchedule;
 import com.jzh.raft.core2.model.schedule.LogReplicationSchedule;
 
+import java.util.Collections;
 import java.util.Objects;
 
 public class Node implements INode {
-    private String nodeId;
     private AbsNodeRole role;
-    private NodeAddress address;
-    private NodeContext nodeContext;
+    private final NodeContext nodeContext;
+
+    public Node(NodeContext nodeContext) {
+        this.nodeContext = nodeContext;
+    }
+
+    public NodeId getNodeId() {
+        return this.nodeContext.getNodeInfo().getNodeEndPoint().getNodeId();
+    }
+
+    public NodeGroup getNodeGroup() {
+        return this.nodeContext.getNodeGroup();
+    }
 
     @Override
     public void start() {
@@ -36,9 +48,9 @@ public class Node implements INode {
      */
     private void processElectionTimeoutEvent() {
         this.role = new CandidateRole(this.role.getCurrentTerm() + 1, getANewElectionTimeoutSchedule());
-        RequestVoteRpc requestVoteRpc = new RequestVoteRpc(nodeId, role.getCurrentTerm(),
+        RequestVoteRpc requestVoteRpc = new RequestVoteRpc(getNodeId(), role.getCurrentTerm(),
                 this.nodeContext.getLastCommitLogTerm(), this.nodeContext.getLastCommitLogIndex());
-        this.nodeContext.getConnector().sendRequestVoteRpc(nodeContext.getNodeAddressMap().values(), requestVoteRpc);
+        this.nodeContext.getConnector().sendRequestVoteRpc(getNodeGroup().getMemberAddresses(), requestVoteRpc);
     }
 
     /**
@@ -48,7 +60,11 @@ public class Node implements INode {
     private void onReceiveRequestVoteRpc(RequestVoteRpc requestVoteRpc) {
         this.nodeContext.getExecutorPool().submit(() -> {
             RequestVoteResult result = processReceiveRequestVoteRpc(requestVoteRpc);
-            this.nodeContext.getConnector().replyRequestVoteResult(nodeContext.getNodeAddressMap().get(requestVoteRpc.getNodeId()), result);
+            GroupMember member = getNodeGroup().getMember(requestVoteRpc.getNodeId());
+            if (member == null) {
+                return;
+            }
+            this.nodeContext.getConnector().replyRequestVoteResult(member.getNodeEndPoint().getAddress(), result);
         });
     }
 
@@ -63,12 +79,12 @@ public class Node implements INode {
         // if requestVote's committed log is newer than or equals to node's, vote to the requester
         // first compare the term number, then compare the index
         if (requestVoteRpc.getTerm() > this.role.getCurrentTerm()) {
-            String voteFor = null;
+            NodeId voteFor = null;
             if (isCommittedLogNewerThanOwn(requestVoteRpc.getLastCommittedLogEntryTerm(), requestVoteRpc.getLastCommittedLastLogEntryIndex())) {
                 voteFor = requestVoteRpc.getNodeId();
             }
-            this.role = new FollowerRole(requestVoteRpc.getTerm(), voteFor, getANewElectionTimeoutSchedule());
-            return new RequestVoteResult(this.nodeId, true, this.role.getCurrentTerm());
+            changeTo(new FollowerRole(requestVoteRpc.getTerm(), voteFor, getANewElectionTimeoutSchedule()));
+            return new RequestVoteResult(getNodeId(), true, this.role.getCurrentTerm());
         }
 
         // when requestVote.term is equals to currentTerm
@@ -82,17 +98,17 @@ public class Node implements INode {
                     FollowerRole ownRole = (FollowerRole)this.role;
                     if ((ownRole.getVoteFor() == null || Objects.equals(ownRole.getVoteFor(), requestVoteRpc.getNodeId())) &&
                             isCommittedLogNewerThanOwn(requestVoteRpc.getLastCommittedLogEntryTerm(), requestVoteRpc.getLastCommittedLastLogEntryIndex())) {
-                        this.role = new FollowerRole(requestVoteRpc.getTerm(), requestVoteRpc.getNodeId(), getANewElectionTimeoutSchedule());
-                        return new RequestVoteResult(this.nodeId, true, this.role.getCurrentTerm());
+                        changeTo(new FollowerRole(requestVoteRpc.getTerm(), requestVoteRpc.getNodeId(), getANewElectionTimeoutSchedule()));
+                        return new RequestVoteResult(getNodeId(), true, this.role.getCurrentTerm());
                     }
-                    return new RequestVoteResult(this.nodeId, false, this.role.getCurrentTerm());
+                    return new RequestVoteResult(getNodeId(), false, this.role.getCurrentTerm());
                 case CANDIDATE:
                 case LEADER:
-                    return new RequestVoteResult(this.nodeId, false, this.role.getCurrentTerm());
+                    return new RequestVoteResult(getNodeId(), false, this.role.getCurrentTerm());
             }
         }
 
-        return new RequestVoteResult(this.nodeId, false, this.role.getCurrentTerm());
+        return new RequestVoteResult(getNodeId(), false, this.role.getCurrentTerm());
 
     }
 
@@ -109,14 +125,14 @@ public class Node implements INode {
             return;
         }
         if (!requestVoteResult.getResult() && requestVoteResult.getOwnTerm() > this.role.getCurrentTerm()) {
-            this.role = new FollowerRole(requestVoteResult.getOwnTerm(), null, getANewElectionTimeoutSchedule());
+            changeTo(new FollowerRole(requestVoteResult.getOwnTerm(), null, getANewElectionTimeoutSchedule()));
             return;
         }
         if (requestVoteResult.getResult()) {
             CandidateRole candidateRole = (CandidateRole) (this.role);
             int voteCount = candidateRole.getVoteCount() + 1;
-            if (voteCount > (this.nodeContext.getNodeAddressMap().size() + 1) / 2) {
-                this.role = new LeaderRole(this.role.getCurrentTerm(), getANewLogReplicationSchedule());
+            if (voteCount > (this.nodeContext.getNodeGroup().size() + 1) / 2) {
+                changeTo(new LeaderRole(this.role.getCurrentTerm(), getANewLogReplicationSchedule()));
             } else {
                 candidateRole.setVoteCount(voteCount);
             }
@@ -136,10 +152,18 @@ public class Node implements INode {
     }
 
     private void processLogReplicationEvent() {
-
+        AppendEntriesRpc rpc = new AppendEntriesRpc(this.nodeContext.getLastCommitLogIndex(), this.nodeContext.getLastCommitLogTerm(), Collections.emptyList());
     }
 
-    private Boolean isCommittedLogNewerThanOwn(Long lastCommittedLogTerm, Long lastCommittedLogIndex) {
+    private void changeTo(AbsNodeRole nodeRole) {
+        if (this.role != null) {
+            this.role.stopScheduleTask();
+        }
+        this.nodeContext.getStore().saveCurrentTerm(nodeRole.getCurrentTerm());
+        this.role = nodeRole;
+    }
+
+    private Boolean isCommittedLogNewerThanOwn(Integer lastCommittedLogTerm, Long lastCommittedLogIndex) {
         return lastCommittedLogTerm > this.nodeContext.getLastCommitLogTerm() ||
                 (Objects.equals(lastCommittedLogTerm, this.nodeContext.getLastCommitLogTerm()) &&
                         lastCommittedLogIndex >= this.nodeContext.getLastCommitLogIndex());

@@ -12,6 +12,8 @@ public class LeaderRole extends AbsNodeRole {
 
     @Override
     public void stopScheduleTask() {
-        schedule.cancel();
+        if (this.schedule != null) {
+            schedule.cancel();
+        }
     }
 }
